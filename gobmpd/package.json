@@ -1,0 +1,15 @@
+{
+  "name": "gobmpd-socketio",
+  "version": "0.0.1",
+  "description": "gobmpd socketio forwarder",
+  "main": "socketio-client.js",
+  "dependencies": {
+    "socketio": "^1.0.0"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "mocha"
+  },
+  "author": "David Flamini",
+  "license": "ISC"
+}
