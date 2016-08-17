@@ -1,4 +1,4 @@
-// Copyright (C) 2014 Nippon Telegraph and Telephone Corporation.
+// Copyright (C) 2014-2016 Nippon Telegraph and Telephone Corporation.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,11 +16,9 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	log "github.com/Sirupsen/logrus"
 	"github.com/eapache/channels"
-	api "github.com/osrg/gobgp/api"
 	"github.com/osrg/gobgp/config"
 	"github.com/osrg/gobgp/packet/bgp"
 	"github.com/osrg/gobgp/table"
@@ -130,7 +128,7 @@ func (peer *Peer) getAccepted(rfList []bgp.RouteFamily) []*table.Path {
 	return peer.adjRibIn.PathList(rfList, true)
 }
 
-func (peer *Peer) filterpath(path *table.Path) *table.Path {
+func (peer *Peer) filterpath(path *table.Path, withdrawals []*table.Path) *table.Path {
 	// special handling for RTC nlri
 	// see comments in (*Destination).Calculate()
 	if path != nil && path.GetRouteFamily() == bgp.RF_RTC_UC && !path.IsWithdraw {
@@ -149,7 +147,7 @@ func (peer *Peer) filterpath(path *table.Path) *table.Path {
 			}
 		}
 	}
-	if filterpath(peer, path) == nil {
+	if path = filterpath(peer, path, withdrawals); path == nil {
 		return nil
 	}
 
@@ -174,7 +172,7 @@ func (peer *Peer) getBestFromLocal(rfList []bgp.RouteFamily) ([]*table.Path, []*
 	pathList := []*table.Path{}
 	filtered := []*table.Path{}
 	for _, path := range peer.localRib.GetBestPathList(peer.TableID(), rfList) {
-		if p := peer.filterpath(path); p != nil {
+		if p := peer.filterpath(path, nil); p != nil {
 			pathList = append(pathList, p)
 		} else {
 			filtered = append(filtered, path)
@@ -202,23 +200,9 @@ func (peer *Peer) processOutgoingPaths(paths, withdrawals []*table.Path) []*tabl
 	}
 
 	outgoing := make([]*table.Path, 0, len(paths))
-	// Note: multiple paths having the same prefix could exist the
-	// withdrawals list in the case of Route Server setup with
-	// import policies modifying paths. In such case, gobgp sends
-	// duplicated update messages; withdraw messages for the same
-	// prefix.
-	// However, currently we don't support local path for Route
-	// Server setup so this is NOT the case.
-	for _, path := range withdrawals {
-		if path.IsLocal() {
-			if _, ok := peer.fsm.rfMap[path.GetRouteFamily()]; ok {
-				outgoing = append(outgoing, path)
-			}
-		}
-	}
 
 	for _, path := range paths {
-		if p := peer.filterpath(path); p != nil {
+		if p := peer.filterpath(path, withdrawals); p != nil {
 			outgoing = append(outgoing, p)
 		}
 	}
@@ -384,14 +368,14 @@ func (peer *Peer) PassConn(conn *net.TCPConn) {
 	}
 }
 
-func (peer *Peer) MarshalJSON() ([]byte, error) {
-	return json.Marshal(peer.ToApiStruct())
-}
+func (peer *Peer) ToConfig() *config.Neighbor {
+	// create copy which can be access to without mutex
+	conf := *peer.fsm.pConf
 
-func (peer *Peer) ToApiStruct() *api.Peer {
-
-	f := peer.fsm
-	c := f.pConf
+	conf.AfiSafis = make([]config.AfiSafi, len(peer.fsm.pConf.AfiSafis))
+	for i := 0; i < len(peer.fsm.pConf.AfiSafis); i++ {
+		conf.AfiSafis[i] = peer.fsm.pConf.AfiSafis[i]
+	}
 
 	remoteCap := make([][]byte, 0, len(peer.fsm.capMap))
 	for _, c := range peer.fsm.capMap {
@@ -400,6 +384,7 @@ func (peer *Peer) ToApiStruct() *api.Peer {
 			remoteCap = append(remoteCap, buf)
 		}
 	}
+	conf.State.Capabilities.RemoteList = remoteCap
 
 	caps := capabilitiesFromConfig(peer.fsm.pConf)
 	localCap := make([][]byte, 0, len(caps))
@@ -407,120 +392,25 @@ func (peer *Peer) ToApiStruct() *api.Peer {
 		buf, _ := c.Serialize()
 		localCap = append(localCap, buf)
 	}
+	conf.State.Capabilities.LocalList = localCap
 
-	prefixLimits := make([]*api.PrefixLimit, 0, len(peer.fsm.pConf.AfiSafis))
-	for _, family := range peer.fsm.pConf.AfiSafis {
-		if c := family.PrefixLimit.Config; c.MaxPrefixes > 0 {
-			k, _ := bgp.GetRouteFamily(string(family.Config.AfiSafiName))
-			prefixLimits = append(prefixLimits, &api.PrefixLimit{
-				Family:               uint32(k),
-				MaxPrefixes:          c.MaxPrefixes,
-				ShutdownThresholdPct: uint32(c.ShutdownThresholdPct),
-			})
-		}
-	}
+	conf.State.Description = peer.fsm.peerInfo.ID.To4().String()
+	conf.State.SessionState = config.IntToSessionStateMap[int(peer.fsm.state)]
+	conf.State.AdminState = peer.fsm.adminState.String()
 
-	conf := &api.PeerConf{
-		NeighborAddress:  c.Config.NeighborAddress,
-		Id:               peer.fsm.peerInfo.ID.To4().String(),
-		PeerAs:           c.Config.PeerAs,
-		LocalAs:          c.Config.LocalAs,
-		PeerType:         uint32(c.Config.PeerType.ToInt()),
-		AuthPassword:     c.Config.AuthPassword,
-		RemovePrivateAs:  uint32(c.Config.RemovePrivateAs.ToInt()),
-		RouteFlapDamping: c.Config.RouteFlapDamping,
-		SendCommunity:    uint32(c.Config.SendCommunity.ToInt()),
-		Description:      c.Config.Description,
-		PeerGroup:        c.Config.PeerGroup,
-		RemoteCap:        remoteCap,
-		LocalCap:         localCap,
-		PrefixLimits:     prefixLimits,
-	}
-
-	timer := c.Timers
-	s := c.State
-
-	advertised := uint32(0)
-	received := uint32(0)
-	accepted := uint32(0)
-	if f.state == bgp.BGP_FSM_ESTABLISHED {
+	if peer.fsm.state == bgp.BGP_FSM_ESTABLISHED {
 		rfList := peer.configuredRFlist()
-		advertised = uint32(peer.adjRibOut.Count(rfList))
-		received = uint32(peer.adjRibIn.Count(rfList))
-		accepted = uint32(peer.adjRibIn.Accepted(rfList))
-	}
+		conf.State.AdjTable.Advertised = uint32(peer.adjRibOut.Count(rfList))
+		conf.State.AdjTable.Received = uint32(peer.adjRibIn.Count(rfList))
+		conf.State.AdjTable.Accepted = uint32(peer.adjRibIn.Accepted(rfList))
 
-	uptime := int64(0)
-	if timer.State.Uptime != 0 {
-		uptime = timer.State.Uptime
-	}
-	downtime := int64(0)
-	if timer.State.Downtime != 0 {
-		downtime = timer.State.Downtime
-	}
+		conf.Transport.State.LocalAddress, conf.Transport.State.LocalPort = peer.fsm.LocalHostPort()
+		_, conf.Transport.State.RemotePort = peer.fsm.RemoteHostPort()
 
-	timerconf := &api.TimersConfig{
-		ConnectRetry:      uint64(timer.Config.ConnectRetry),
-		HoldTime:          uint64(timer.Config.HoldTime),
-		KeepaliveInterval: uint64(timer.Config.KeepaliveInterval),
-	}
+		conf.State.ReceivedOpenMessage, _ = peer.fsm.recvOpen.Serialize()
 
-	timerstate := &api.TimersState{
-		KeepaliveInterval:  uint64(timer.State.KeepaliveInterval),
-		NegotiatedHoldTime: uint64(timer.State.NegotiatedHoldTime),
-		Uptime:             uint64(uptime),
-		Downtime:           uint64(downtime),
 	}
-
-	apitimer := &api.Timers{
-		Config: timerconf,
-		State:  timerstate,
-	}
-	msgrcv := &api.Message{
-		NOTIFICATION: s.Messages.Received.Notification,
-		UPDATE:       s.Messages.Received.Update,
-		OPEN:         s.Messages.Received.Open,
-		KEEPALIVE:    s.Messages.Received.Keepalive,
-		REFRESH:      s.Messages.Received.Refresh,
-		DISCARDED:    s.Messages.Received.Discarded,
-		TOTAL:        s.Messages.Received.Total,
-	}
-	msgsnt := &api.Message{
-		NOTIFICATION: s.Messages.Sent.Notification,
-		UPDATE:       s.Messages.Sent.Update,
-		OPEN:         s.Messages.Sent.Open,
-		KEEPALIVE:    s.Messages.Sent.Keepalive,
-		REFRESH:      s.Messages.Sent.Refresh,
-		DISCARDED:    s.Messages.Sent.Discarded,
-		TOTAL:        s.Messages.Sent.Total,
-	}
-	msg := &api.Messages{
-		Received: msgrcv,
-		Sent:     msgsnt,
-	}
-	info := &api.PeerState{
-		BgpState:   f.state.String(),
-		AdminState: f.adminState.String(),
-		Messages:   msg,
-		Received:   received,
-		Accepted:   accepted,
-		Advertised: advertised,
-	}
-	rr := &api.RouteReflector{
-		RouteReflectorClient:    peer.fsm.pConf.RouteReflector.Config.RouteReflectorClient,
-		RouteReflectorClusterId: string(peer.fsm.pConf.RouteReflector.Config.RouteReflectorClusterId),
-	}
-	rs := &api.RouteServer{
-		RouteServerClient: peer.fsm.pConf.RouteServer.Config.RouteServerClient,
-	}
-
-	return &api.Peer{
-		Conf:           conf,
-		Info:           info,
-		Timers:         apitimer,
-		RouteReflector: rr,
-		RouteServer:    rs,
-	}
+	return &conf
 }
 
 func (peer *Peer) DropAll(rfList []bgp.RouteFamily) {

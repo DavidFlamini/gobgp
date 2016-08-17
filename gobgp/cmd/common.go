@@ -26,6 +26,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -101,6 +102,7 @@ var actionOpts struct {
 var mrtOpts struct {
 	OutputDir  string
 	FileFormat string
+	Best       bool `long:"only-best" description:"only keep best path routes"`
 }
 
 func formatTimedelta(d int64) string {
@@ -254,8 +256,6 @@ func extractReserved(args, keys []string) map[string][]string {
 		if isReserved(arg) {
 			k = arg
 			m[k] = make([]string, 0, 1)
-		} else if k == "" {
-			m[k] = []string{arg}
 		} else {
 			m[k] = append(m[k], arg)
 		}
@@ -264,7 +264,7 @@ func extractReserved(args, keys []string) map[string][]string {
 }
 
 type PeerConf struct {
-	RemoteIp          net.IP                             `json:"remote_ip,omitempty"`
+	RemoteIp          string                             `json:"remote_ip,omitempty"`
 	Id                net.IP                             `json:"id,omitempty"`
 	RemoteAs          uint32                             `json:"remote_as,omitempty"`
 	LocalAs           uint32                             `json:"local-as,omitempty"`
@@ -272,7 +272,9 @@ type PeerConf struct {
 	LocalCap          []bgp.ParameterCapabilityInterface `json:"local_cap,omitempty"`
 	Holdtime          uint32                             `json:"holdtime,omitempty"`
 	KeepaliveInterval uint32                             `json:"keepalive_interval,omitempty"`
-	PrefixLimits      []*gobgpapi.PrefixLimit
+	PrefixLimits      []*gobgpapi.PrefixLimit            `json:"prefix_limits,omitempty"`
+	LocalIp           string                             `json:"local_ip,omitempty"`
+	Interface         string                             `json:"interface,omitempty"`
 }
 
 type Peer struct {
@@ -294,14 +296,18 @@ func ApiStruct2Peer(p *gobgpapi.Peer) *Peer {
 		c, _ := bgp.DecodeCapability(buf)
 		remoteCaps = append(remoteCaps, c)
 	}
+	remoteIp, _ := net.ResolveIPAddr("ip", p.Conf.NeighborAddress)
+	localIp, _ := net.ResolveIPAddr("ip", p.Conf.LocalAddress)
 	conf := PeerConf{
-		RemoteIp:     net.ParseIP(p.Conf.NeighborAddress),
+		RemoteIp:     remoteIp.String(),
 		Id:           net.ParseIP(p.Conf.Id),
 		RemoteAs:     p.Conf.PeerAs,
 		LocalAs:      p.Conf.LocalAs,
 		RemoteCap:    remoteCaps,
 		LocalCap:     localCaps,
 		PrefixLimits: p.Conf.PrefixLimits,
+		LocalIp:      localIp.String(),
+		Interface:    p.Conf.NeighborInterface,
 	}
 	return &Peer{
 		Conf:           conf,
@@ -325,8 +331,8 @@ func (p peers) Swap(i, j int) {
 func (p peers) Less(i, j int) bool {
 	p1 := p[i].Conf.RemoteIp
 	p2 := p[j].Conf.RemoteIp
-	p1Isv4 := p1.To4() != nil
-	p2Isv4 := p2.To4() != nil
+	p1Isv4 := !strings.Contains(p1, ":")
+	p2Isv4 := !strings.Contains(p2, ":")
 	if p1Isv4 != p2Isv4 {
 		if p1Isv4 {
 			return true
@@ -337,8 +343,8 @@ func (p peers) Less(i, j int) bool {
 	if p1Isv4 {
 		addrlen = 32
 	}
-	strings := sort.StringSlice{cidr2prefix(fmt.Sprintf("%s/%d", p1.String(), addrlen)),
-		cidr2prefix(fmt.Sprintf("%s/%d", p2.String(), addrlen))}
+	strings := sort.StringSlice{cidr2prefix(fmt.Sprintf("%s/%d", p1, addrlen)),
+		cidr2prefix(fmt.Sprintf("%s/%d", p2, addrlen))}
 	return strings.Less(0, 1)
 }
 
@@ -477,7 +483,7 @@ func checkAddressFamily(def bgp.RouteFamily) (bgp.RouteFamily, error) {
 	return rf, e
 }
 
-func exitWithError(err error) {
+func printError(err error) {
 	if globalOpts.Json {
 		j, _ := json.Marshal(struct {
 			Error string `json:"error"`
@@ -486,5 +492,9 @@ func exitWithError(err error) {
 	} else {
 		fmt.Println(err)
 	}
+}
+
+func exitWithError(err error) {
+	printError(err)
 	os.Exit(1)
 }

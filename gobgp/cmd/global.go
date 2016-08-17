@@ -254,15 +254,15 @@ func ParseExtendedCommunities(input string) ([]bgp.ExtendedCommunityInterface, e
 	for i, idx := range idxs {
 		var a []string
 		f := ExtCommParserMap[idx.t]
-		if f == nil {
-			continue
-		}
 		if i < len(idxs)-1 {
 			a = args[:idxs[i+1].i-idx.i]
 			args = args[(idxs[i+1].i - idx.i):]
 		} else {
 			a = args
 			args = nil
+		}
+		if f == nil {
+			continue
 		}
 		ext, err := f(a)
 		if err != nil {
@@ -767,6 +767,7 @@ func modPath(resource api.Resource, name, modtype string, args []string) error {
 		for _, v := range bgp.ProtocolNameMap {
 			ss = append(ss, v)
 		}
+		ss = append(ss, "<VALUE>")
 		protos := strings.Join(ss, ", ")
 		ss = make([]string, 0, len(bgp.TCPFlagNameMap))
 		for _, v := range bgp.TCPFlagNameMap {
@@ -997,7 +998,7 @@ func NewGlobalCmd() *cobra.Command {
 				exitWithError(fmt.Errorf("usage: gobgp global policy [{ import | export }]"))
 			}
 			for _, v := range []string{CMD_IMPORT, CMD_EXPORT} {
-				if err := showNeighborPolicy(nil, v, 4); err != nil {
+				if err := showNeighborPolicy("", v, 4); err != nil {
 					exitWithError(err)
 				}
 			}
@@ -1008,7 +1009,7 @@ func NewGlobalCmd() *cobra.Command {
 		cmd := &cobra.Command{
 			Use: v,
 			Run: func(cmd *cobra.Command, args []string) {
-				if err := showNeighborPolicy(nil, cmd.Use, 0); err != nil {
+				if err := showNeighborPolicy("", cmd.Use, 0); err != nil {
 					exitWithError(err)
 				}
 			},
@@ -1018,7 +1019,7 @@ func NewGlobalCmd() *cobra.Command {
 			subcmd := &cobra.Command{
 				Use: w,
 				Run: func(subcmd *cobra.Command, args []string) {
-					err := modNeighborPolicy(nil, cmd.Use, subcmd.Use, args)
+					err := modNeighborPolicy("", cmd.Use, subcmd.Use, args)
 					if err != nil {
 						exitWithError(err)
 					}

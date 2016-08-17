@@ -436,7 +436,7 @@ func (h *FSMHandler) idle() (bgp.FSMState, FsmStateReason) {
 				return bgp.BGP_FSM_ACTIVE, FSM_IDLE_HOLD_TIMER_EXPIRED
 
 			} else {
-				log.Debug("IdleHoldTimer expired, but stay at idle because the admin state is DOWN")
+				log.WithFields(log.Fields{"Topic": "Peer"}).Debug("IdleHoldTimer expired, but stay at idle because the admin state is DOWN")
 			}
 
 		case s := <-fsm.adminStateCh:
@@ -657,7 +657,6 @@ func (h *FSMHandler) recvMessageWithError() (*FsmMsg, error) {
 					if err == nil {
 						fmsg.PathList = table.ProcessMessage(m, h.fsm.peerInfo, fmsg.timestamp)
 						id := h.fsm.pConf.Config.NeighborAddress
-						policyMutex.RLock()
 						for _, path := range fmsg.PathList {
 							if path.IsEOR() {
 								continue
@@ -666,7 +665,6 @@ func (h *FSMHandler) recvMessageWithError() (*FsmMsg, error) {
 								path.Filter(id, table.POLICY_DIRECTION_IN)
 							}
 						}
-						policyMutex.RUnlock()
 					} else {
 						fmsg.MsgData = err
 					}
@@ -1263,7 +1261,7 @@ func (h *FSMHandler) loop() error {
 	}
 
 	e := time.AfterFunc(time.Second*120, func() {
-		log.Fatal("failed to free the fsm.h.t for ", fsm.pConf.Config.NeighborAddress, oldState, nextState)
+		log.WithFields(log.Fields{"Topic": "Peer"}).Fatalf("failed to free the fsm.h.t for %s %s %s", fsm.pConf.Config.NeighborAddress, oldState, nextState)
 	})
 	h.t.Wait()
 	e.Stop()

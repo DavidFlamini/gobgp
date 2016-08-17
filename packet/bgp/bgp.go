@@ -362,12 +362,18 @@ func (c *CapGracefulRestart) DecodeFromBytes(data []byte) error {
 	c.Flags = uint8(restart >> 12)
 	c.Time = restart & 0xfff
 	data = data[2:]
-	c.Tuples = make([]*CapGracefulRestartTuple, 0, len(data)/4)
-	for len(data) >= 4 {
-		t := &CapGracefulRestartTuple{binary.BigEndian.Uint16(data[0:2]),
-			data[2], data[3]}
-		c.Tuples = append(c.Tuples, t)
-		data = data[4:]
+
+	valueLen := int(c.CapLen) - 2
+
+	if valueLen >= 4 && len(data) >= valueLen {
+		c.Tuples = make([]*CapGracefulRestartTuple, 0, valueLen/4)
+
+		for i := valueLen; i >= 4; i -= 4 {
+			t := &CapGracefulRestartTuple{binary.BigEndian.Uint16(data[0:2]),
+				data[2], data[3]}
+			c.Tuples = append(c.Tuples, t)
+			data = data[4:]
+		}
 	}
 	return nil
 }
@@ -1108,6 +1114,7 @@ func ParseRouteDistinguisher(rd string) (RouteDistinguisherInterface, error) {
 // The label information carried (as part of NLRI) in the Withdrawn
 // Routes field should be set to 0x800000.
 const WITHDRAW_LABEL = uint32(0x800000)
+const ZERO_LABEL = uint32(0) // some platform uses this as withdraw label
 
 type MPLSLabelStack struct {
 	Labels []uint32
@@ -1118,7 +1125,7 @@ func (l *MPLSLabelStack) DecodeFromBytes(data []byte) error {
 	foundBottom := false
 	for len(data) >= 3 {
 		label := uint32(data[0])<<16 | uint32(data[1])<<8 | uint32(data[2])
-		if label == WITHDRAW_LABEL {
+		if label == WITHDRAW_LABEL || label == ZERO_LABEL {
 			l.Labels = []uint32{label}
 			return nil
 		}
@@ -2211,28 +2218,26 @@ func flowSpecPrefixParser(rf RouteFamily, args []string) (FlowSpecComponentInter
 }
 
 func flowSpecIpProtoParser(rf RouteFamily, args []string) (FlowSpecComponentInterface, error) {
-	ss := make([]string, 0, len(ProtocolNameMap))
-	for _, v := range ProtocolNameMap {
-		ss = append(ss, v)
-	}
-	protos := strings.Join(ss, "|")
-	exp := regexp.MustCompile(fmt.Sprintf("^%s (((%s) )*)(%s)$", FlowSpecNameMap[FLOW_SPEC_TYPE_IP_PROTO], protos, protos))
-	elems := exp.FindStringSubmatch(strings.Join(args, " "))
-	if len(elems) < 2 {
+	if len(args) < 2 || args[0] != FlowSpecNameMap[FLOW_SPEC_TYPE_IP_PROTO] {
 		return nil, fmt.Errorf("invalid ip-proto format")
 	}
 	items := make([]*FlowSpecComponentItem, 0)
 	eq := 0x1
-	if elems[1] != "" {
-		for _, v := range strings.Split(elems[1], " ") {
-			p, ok := ProtocolValueMap[v]
-			if !ok {
-				continue
-			}
-			items = append(items, NewFlowSpecComponentItem(eq, int(p)))
+	for _, v := range args[1:] {
+		if v == "" {
+			continue
 		}
+		p, ok := ProtocolValueMap[v]
+		if ok {
+			items = append(items, NewFlowSpecComponentItem(eq, int(p)))
+			continue
+		}
+		i, err := strconv.ParseUint(v, 10, 8)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ip-proto format: failed to parse %s", v)
+		}
+		items = append(items, NewFlowSpecComponentItem(eq, int(i)))
 	}
-	items = append(items, NewFlowSpecComponentItem(eq, int(ProtocolValueMap[elems[4]])))
 	return NewFlowSpecComponent(FLOW_SPEC_TYPE_IP_PROTO, items), nil
 }
 
